@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:js_interop';
+import 'dart:js_interop_unsafe'; // GuidePilot patch: setProperty for webkitPreservesPitch
 import 'dart:math';
 
 import 'package:flutter/services.dart';
@@ -115,6 +116,40 @@ class Html5AudioPlayer extends JustAudioPlayer {
   //final _audioElement = HTMLAudioElement();
   final _audioElement = document.createElement('audio') as HTMLAudioElement;
   late final _audioElementQueue = _AudioElementQueue(_audioElement);
+
+  // ===========================================================================
+  // GuidePilot patch — iOS-web playbackRate glitch fix (preservesPitch).
+  //
+  // The media-sync DriftController keeps audio in sync by nudging playbackRate
+  // ~4x/s. On iOS Safari every playbackRate change re-inits the time-stretch
+  // (pitch-preservation) unit, producing an audible pause/resume glitch.
+  // Disabling preservesPitch turns a rate change into a plain resample
+  // (tape-speed; ~0.2-0.5 semitones at our <=3% deviation — inaudible for
+  // speech) and avoids the re-init.
+  //
+  // just_audio_web's <audio> element is created detached from the DOM and kept
+  // private, so a global DOM sweep cannot reach it — hence this fork.
+  //
+  // Toggle (no rebuild needed): the value follows the `preservesPitch` URL
+  // query param so it can be flipped on-device for a clean A/B —
+  //   default / absent      -> false (the fix; glitch should be gone)
+  //   ?preservesPitch=true  -> true  (WebKit default; reproduces the glitch)
+  static final bool _preservesPitch =
+      (Uri.base.queryParameters['preservesPitch'] ?? 'false').toLowerCase() ==
+          'true';
+
+  /// One-shot guard so the active-mode line is logged once, not per player.
+  static bool _loggedPreservesPitch = false;
+
+  /// Re-applies [_preservesPitch] to the audio element. Must run after element
+  /// creation AND after each source change (Safari resets the flag on `src`).
+  void _applyPreservesPitch() {
+    _audioElement.preservesPitch = _preservesPitch;
+    // Legacy WebKit name for older iOS Safari — not in the typed binding.
+    (_audioElement as JSObject)
+        .setProperty('webkitPreservesPitch'.toJS, _preservesPitch.toJS);
+  }
+  // ===========================================================================
   Completer<dynamic>? _durationCompleter;
   AudioSourcePlayer? _audioSourcePlayer;
   LoopModeMessage _loopMode = LoopModeMessage.off;
@@ -123,6 +158,12 @@ class Html5AudioPlayer extends JustAudioPlayer {
 
   /// Creates an [Html5AudioPlayer] with the given [id].
   Html5AudioPlayer({required String id}) : super(id: id) {
+    _applyPreservesPitch(); // GuidePilot patch
+    if (!_loggedPreservesPitch) {
+      _loggedPreservesPitch = true;
+      // ignore: avoid_print
+      print('[GuidePilot] just_audio_web fork active: preservesPitch=$_preservesPitch');
+    }
     _audioElement.addEventListener(
         'durationchange',
         (Event event) {
@@ -281,6 +322,7 @@ class Html5AudioPlayer extends JustAudioPlayer {
     if (src != _audioElement.src) {
       _durationCompleter = Completer<dynamic>();
       _audioElement.src = src;
+      _applyPreservesPitch(); // GuidePilot patch: Safari resets the flag on src change
       _audioElement.playbackRate = _speed;
       _audioElement.preload = 'auto';
       await _audioElementQueue.load();
@@ -331,6 +373,7 @@ class Html5AudioPlayer extends JustAudioPlayer {
 
   @override
   Future<SetSpeedResponse> setSpeed(SetSpeedRequest request) async {
+    _applyPreservesPitch(); // GuidePilot patch: guarantee the flag whenever rate changes
     _audioElement.playbackRate = _speed = request.speed;
     return SetSpeedResponse();
   }
