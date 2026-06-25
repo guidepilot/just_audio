@@ -124,30 +124,37 @@ class Html5AudioPlayer extends JustAudioPlayer {
   // ~4x/s. On iOS Safari every playbackRate change re-inits the time-stretch
   // (pitch-preservation) unit, producing an audible pause/resume glitch.
   // Disabling preservesPitch turns a rate change into a plain resample
-  // (tape-speed; ~0.2-0.5 semitones at our <=3% deviation — inaudible for
-  // speech) and avoids the re-init.
+  // (tape-speed) and avoids the re-init.
+  //
+  // SCOPED BY RATE, NOT PLATFORM. Disabling preservesPitch globally would also
+  // pitch-shift the user-facing 0.75x..2x speed control on every web platform
+  // (the main deployment) — a regression. So we only disable it within a small
+  // band around 1.0x, where the shift is inaudible (<=[_pitchPreserveBandwidth]
+  // ~= a few tenths of a semitone) and where the high-frequency sync nudges
+  // live. Outside the band — deliberate speed changes — pitch preservation
+  // stays on, exactly as upstream. No (unreliable) iOS detection needed.
   //
   // just_audio_web's <audio> element is created detached from the DOM and kept
   // private, so a global DOM sweep cannot reach it — hence this fork.
-  //
-  // Toggle (no rebuild needed): the value follows the `preservesPitch` URL
-  // query param so it can be flipped on-device for a clean A/B —
-  //   default / absent      -> false (the fix; glitch should be gone)
-  //   ?preservesPitch=true  -> true  (WebKit default; reproduces the glitch)
-  static final bool _preservesPitch =
-      (Uri.base.queryParameters['preservesPitch'] ?? 'false').toLowerCase() ==
-          'true';
+
+  /// Half-width of the band around 1.0x within which pitch preservation is
+  /// disabled (covers the media-sync nudge range incl. the `glide` preset's
+  /// +/-10%, with headroom; still an inaudible shift).
+  static const double _pitchPreserveBandwidth = 0.15;
 
   /// One-shot guard so the active-mode line is logged once, not per player.
   static bool _loggedPreservesPitch = false;
 
-  /// Re-applies [_preservesPitch] to the audio element. Must run after element
-  /// creation AND after each source change (Safari resets the flag on `src`).
-  void _applyPreservesPitch() {
-    _audioElement.preservesPitch = _preservesPitch;
+  /// Applies the scoped preservesPitch policy for a given playback [rate].
+  /// Must run after element creation AND after each source change (Safari
+  /// resets the flag on `src`), and whenever the rate changes.
+  void _applyPreservesPitchFor(double rate) {
+    // Preserve pitch unless we're in the near-1.0x sync band.
+    final preserve = (rate - 1.0).abs() > _pitchPreserveBandwidth;
+    _audioElement.preservesPitch = preserve;
     // Legacy WebKit name for older iOS Safari — not in the typed binding.
     (_audioElement as JSObject)
-        .setProperty('webkitPreservesPitch'.toJS, _preservesPitch.toJS);
+        .setProperty('webkitPreservesPitch'.toJS, preserve.toJS);
   }
   // ===========================================================================
   Completer<dynamic>? _durationCompleter;
@@ -158,11 +165,12 @@ class Html5AudioPlayer extends JustAudioPlayer {
 
   /// Creates an [Html5AudioPlayer] with the given [id].
   Html5AudioPlayer({required String id}) : super(id: id) {
-    _applyPreservesPitch(); // GuidePilot patch
+    _applyPreservesPitchFor(_speed); // GuidePilot patch (initial rate is 1.0x)
     if (!_loggedPreservesPitch) {
       _loggedPreservesPitch = true;
       // ignore: avoid_print
-      print('[GuidePilot] just_audio_web fork active: preservesPitch=$_preservesPitch');
+      print('[GuidePilot] just_audio_web fork active: '
+          'preservesPitch disabled within ±$_pitchPreserveBandwidth of 1.0x');
     }
     _audioElement.addEventListener(
         'durationchange',
@@ -322,7 +330,7 @@ class Html5AudioPlayer extends JustAudioPlayer {
     if (src != _audioElement.src) {
       _durationCompleter = Completer<dynamic>();
       _audioElement.src = src;
-      _applyPreservesPitch(); // GuidePilot patch: Safari resets the flag on src change
+      _applyPreservesPitchFor(_speed); // GuidePilot patch: Safari resets the flag on src change
       _audioElement.playbackRate = _speed;
       _audioElement.preload = 'auto';
       await _audioElementQueue.load();
@@ -373,7 +381,7 @@ class Html5AudioPlayer extends JustAudioPlayer {
 
   @override
   Future<SetSpeedResponse> setSpeed(SetSpeedRequest request) async {
-    _applyPreservesPitch(); // GuidePilot patch: guarantee the flag whenever rate changes
+    _applyPreservesPitchFor(request.speed); // GuidePilot patch: scope flag to the requested rate
     _audioElement.playbackRate = _speed = request.speed;
     return SetSpeedResponse();
   }
