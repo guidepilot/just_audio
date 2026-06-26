@@ -400,9 +400,6 @@ class Html5AudioPlayer extends JustAudioPlayer {
   /// +/-10%, with headroom; still an inaudible shift).
   static const double _pitchPreserveBandwidth = 0.15;
 
-  /// One-shot guard so the active-mode line is logged once, not per player.
-  static bool _loggedPreservesPitch = false;
-
   /// Applies the scoped preservesPitch policy for a given playback [rate].
   /// Must run after element creation AND after each source change (Safari
   /// resets the flag on `src`), and whenever the rate changes.
@@ -424,12 +421,6 @@ class Html5AudioPlayer extends JustAudioPlayer {
   /// Creates an [Html5AudioPlayer] with the given [id].
   Html5AudioPlayer({required String id}) : super(id: id) {
     _applyPreservesPitchFor(_speed); // GuidePilot patch (initial rate is 1.0x)
-    if (!_loggedPreservesPitch) {
-      _loggedPreservesPitch = true;
-      // ignore: avoid_print
-      print('[GuidePilot] just_audio_web fork active: '
-          'preservesPitch disabled within ±$_pitchPreserveBandwidth of 1.0x');
-    }
     _audioElement.addEventListener(
         'durationchange',
         (Event event) {
