@@ -149,8 +149,24 @@ class WebAudioPlayer extends JustAudioPlayer {
   /// is used for (media-sync narration); raise it if you ever feed it music.
   static const double _sampleRate = 22050;
 
-  AudioContext _context() =>
-      _ctx ??= AudioContext(AudioContextOptions(sampleRate: _sampleRate));
+  AudioContext _context() {
+    final existing = _ctx;
+    if (existing != null) return existing;
+    _ensurePlaybackSession();
+    return _ctx = AudioContext(AudioContextOptions(sampleRate: _sampleRate));
+  }
+
+  /// iOS: set the Web AudioSession category to `playback` so this AudioContext
+  /// plays through the hardware silent/mute switch (like an `<audio>` element).
+  /// Without it, Web Audio on iOS is silenced in silent mode — the `<audio>`
+  /// engine wasn't. Web AudioSession API (Safari/iOS 16.4+); a no-op where
+  /// `navigator.audioSession` is absent, so safe everywhere.
+  void _ensurePlaybackSession() {
+    final session = (window.navigator as JSObject).getProperty('audioSession'.toJS);
+    if (session.isDefinedAndNotNull) {
+      (session as JSObject).setProperty('type'.toJS, 'playback'.toJS);
+    }
+  }
 
   @override
   Stream<PlaybackEventMessage> get playbackEventMessageStream =>
@@ -289,6 +305,7 @@ class WebAudioPlayer extends JustAudioPlayer {
     if (_playing) return PlayResponse();
     _playing = true;
     final ctx = _context();
+    _ensurePlaybackSession(); // re-assert after any interruption/backgrounding
     if (ctx.state == 'suspended') {
       await ctx.resume().toDart;
     }
