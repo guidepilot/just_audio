@@ -418,6 +418,12 @@ class InitRequest {
   final bool? androidOffloadSchedulingEnabled;
   final bool useLazyPreparation;
 
+  /// GuidePilot fork: when true, the web implementation backs this player with
+  /// a Web Audio (`AudioBufferSourceNode`) engine instead of an `<audio>`
+  /// element, so `playbackRate` changes are smooth on Apple WebKit (Safari).
+  /// Ignored by non-web platform implementations.
+  final bool webAudioEngine;
+
   InitRequest({
     required this.id,
     this.audioLoadConfiguration,
@@ -426,6 +432,7 @@ class InitRequest {
     this.androidAudioOffloadPreferences,
     this.androidOffloadSchedulingEnabled,
     this.useLazyPreparation = true,
+    this.webAudioEngine = false,
   });
 
   Map<dynamic, dynamic> toMap() => <dynamic, dynamic>{
@@ -441,6 +448,7 @@ class InitRequest {
             androidAudioOffloadPreferences?.toMap(),
         'androidOffloadSchedulingEnabled': androidOffloadSchedulingEnabled,
         'useLazyPreparation': useLazyPreparation,
+        'webAudioEngine': webAudioEngine,
       };
 }
 

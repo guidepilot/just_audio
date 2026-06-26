@@ -63,6 +63,10 @@ class AudioPlayer {
   /// The user agent to set on all HTTP requests.
   final String? _userAgent;
 
+  /// GuidePilot fork: opt this player into the web Web Audio engine (see
+  /// [InitRequest.webAudioEngine]). Web-only; ignored on native platforms.
+  final bool _webAudioEngine;
+
   /// Whether to use the proxy server to send request headers.
   final bool _useProxyForRequestHeaders;
 
@@ -250,8 +254,10 @@ class AudioPlayer {
     bool useLazyPreparation = true,
     ShuffleOrder? shuffleOrder,
     int maxSkipsOnError = 0,
+    bool webAudioEngine = false,
   })  : _id = _generateId(),
         _userAgent = userAgent,
+        _webAudioEngine = webAudioEngine,
         _androidApplyAudioAttributes =
             androidApplyAudioAttributes && _isAndroid(),
         _handleAudioSessionActivation = handleAudioSessionActivation,
@@ -1651,6 +1657,7 @@ class AudioPlayer {
                 androidAudioOffloadPreferences:
                     _androidAudioOffloadPreferences?._toMessage(),
                 useLazyPreparation: _playlist.useLazyPreparation,
+                webAudioEngine: _webAudioEngine,
               )))
             : (_idlePlatform = _IdleAudioPlayer(
                 id: _id = _generateId(),

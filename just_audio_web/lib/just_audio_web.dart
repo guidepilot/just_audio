@@ -26,7 +26,11 @@ class JustAudioPlugin extends JustAudioPlatform {
           code: "error",
           message: "Platform player ${request.id} already exists");
     }
-    final player = Html5AudioPlayer(id: request.id);
+    // GuidePilot fork: opt-in Web Audio engine for smooth playbackRate on
+    // Apple WebKit (see WebAudioPlayer). Falls back to the <audio> engine.
+    final JustAudioPlayer player = request.webAudioEngine
+        ? WebAudioPlayer(id: request.id)
+        : Html5AudioPlayer(id: request.id);
     players[request.id] = player;
     return player;
   }
@@ -107,6 +111,260 @@ abstract class JustAudioPlayer extends AudioPlayerPlatform {
       errorMessage = null;
     }
     broadcastPlaybackEvent();
+  }
+}
+
+/// GuidePilot fork: a Web Audio implementation of [JustAudioPlayer].
+///
+/// Plays a single decoded clip through an `AudioBufferSourceNode` and controls
+/// speed via the node's `playbackRate` **`AudioParam`**, which changes
+/// smoothly on Apple WebKit (Safari) — unlike `HTMLMediaElement.playbackRate`,
+/// which re-inits/flushes the audio buffer on every change and glitches. Used
+/// only when a player opts in via `InitRequest.webAudioEngine`, so it carries
+/// just the surface media-sync needs (single URI source, play/pause/seek/
+/// speed/volume/loop). The whole clip is fetched + decoded into memory, so
+/// this is intended for short clips, not long-form streaming.
+class WebAudioPlayer extends JustAudioPlayer {
+  AudioContext? _ctx;
+  GainNode? _gain;
+  AudioBuffer? _buffer;
+  AudioBufferSourceNode? _source;
+  String? _src;
+  double _volume = 1.0;
+  bool _loop = false;
+
+  // Position under a varying playbackRate: the content offset captured at the
+  // last anchor, plus rate * elapsed AudioContext time since. We re-anchor on
+  // every rate change, seek, pause and (re)start, so the integral stays exact.
+  double _offsetSec = 0.0;
+  double _anchorCtxTime = 0.0;
+  Timer? _positionTimer; // periodic broadcast while playing (mimics 'timeupdate')
+
+  WebAudioPlayer({required String id}) : super(id: id);
+
+  /// Sample rate for the sync engine's AudioContext. The whole clip is decoded
+  /// into memory (float32 PCM = sampleRate × 4 bytes/s per channel), so a lower
+  /// rate roughly halves the footprint vs 44.1 kHz — and `decodeAudioData`
+  /// resamples to it. 22.05 kHz is transparent for the mono speech this engine
+  /// is used for (media-sync narration); raise it if you ever feed it music.
+  static const double _sampleRate = 22050;
+
+  AudioContext _context() =>
+      _ctx ??= AudioContext(AudioContextOptions(sampleRate: _sampleRate));
+
+  @override
+  Stream<PlaybackEventMessage> get playbackEventMessageStream =>
+      _eventController.stream;
+
+  @override
+  Stream<PlayerDataMessage> get playerDataMessageStream =>
+      _dataEventController.stream;
+
+  double get _nowCtx => (_ctx?.currentTime ?? 0).toDouble();
+
+  double get _positionSec {
+    final buffer = _buffer;
+    if (buffer == null) return 0.0;
+    var pos = _offsetSec;
+    if (_playing) pos += _speed * (_nowCtx - _anchorCtxTime);
+    return pos.clamp(0.0, buffer.duration);
+  }
+
+  /// Freezes the integral: store the current position and re-anchor the clock.
+  void _anchor() {
+    _offsetSec = _positionSec;
+    _anchorCtxTime = _nowCtx;
+  }
+
+  @override
+  Duration getCurrentPosition() =>
+      Duration(milliseconds: (_positionSec * 1000).round());
+
+  @override
+  Duration getBufferedPosition() => Duration(
+      milliseconds: ((_buffer?.duration ?? 0) * 1000).round());
+
+  @override
+  Duration? getDuration() => _buffer == null
+      ? null
+      : Duration(milliseconds: (_buffer!.duration * 1000).round());
+
+  /// Resolves the first URI source within a (possibly wrapped) source tree.
+  /// just_audio wraps even a single source in its playlist, so the load message
+  /// is typically a [ConcatenatingAudioSourceMessage]. Clip bounds/loop counts
+  /// are ignored — this engine plays the underlying clip.
+  UriAudioSourceMessage? _firstUriSource(AudioSourceMessage m) {
+    if (m is UriAudioSourceMessage) return m;
+    if (m is ClippingAudioSourceMessage) return m.child;
+    if (m is LoopingAudioSourceMessage) return _firstUriSource(m.child);
+    if (m is ConcatenatingAudioSourceMessage) {
+      for (final c in m.children) {
+        final u = _firstUriSource(c);
+        if (u != null) return u;
+      }
+    }
+    return null;
+  }
+
+  @override
+  Future<LoadResponse> load(LoadRequest request) async {
+    final uriMsg = _firstUriSource(request.audioSourceMessage);
+    if (uriMsg == null) {
+      throw PlatformException(
+          code: 'error',
+          message: 'WebAudioPlayer supports only URI audio sources');
+    }
+    _stopSource();
+    transition(ProcessingStateMessage.loading);
+    try {
+      final ctx = _context();
+      if (_gain == null) {
+        final g = ctx.createGain();
+        g.gain.value = _volume;
+        g.connect(ctx.destination);
+        _gain = g;
+      }
+      // decodeAudioData requires a CORS-readable response (the audio host must
+      // send Access-Control-Allow-Origin) — unlike <audio> playback.
+      if (_src != uriMsg.uri || _buffer == null) {
+        _src = uriMsg.uri;
+        final resp = await window.fetch(uriMsg.uri.toJS).toDart;
+        final bytes = await resp.arrayBuffer().toDart;
+        _buffer = await ctx.decodeAudioData(bytes).toDart;
+      }
+      _offsetSec = (request.initialPosition?.inMilliseconds ?? 0) / 1000.0;
+      _anchorCtxTime = _nowCtx;
+      transition(ProcessingStateMessage.ready);
+      if (_playing) _startSource();
+      return LoadResponse(duration: getDuration());
+    } catch (e) {
+      errorMessage = e.toString();
+      transition(ProcessingStateMessage.idle);
+      throw PlatformException(
+          code: 'error', message: 'WebAudioPlayer failed to load: $e');
+    }
+  }
+
+  void _startSource() {
+    final ctx = _context();
+    final buffer = _buffer;
+    if (buffer == null) return;
+    _stopSource();
+    final src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.loop = _loop;
+    src.playbackRate.value = _speed;
+    src.connect(_gain!);
+    src.addEventListener('ended', ((Event _) => _onEnded(src)).toJS);
+    src.start(0, _offsetSec);
+    _anchorCtxTime = _nowCtx;
+    _source = src;
+    _startPositionTimer();
+  }
+
+  void _stopSource() {
+    final s = _source;
+    _source = null; // guard: a pending 'ended' for s is now ignored
+    if (s != null) {
+      try {
+        s.stop();
+      } catch (_) {}
+      s.disconnect();
+    }
+    _stopPositionTimer();
+  }
+
+  // Fires on natural end. stop() also fires 'ended', but we null `_source`
+  // before stopping, so only the still-current source reaches completion here.
+  void _onEnded(AudioBufferSourceNode endedSrc) {
+    if (!identical(_source, endedSrc) || !_playing) return;
+    _offsetSec = _buffer?.duration ?? _offsetSec;
+    _playing = false;
+    _stopSource();
+    transition(ProcessingStateMessage.completed);
+  }
+
+  @override
+  Future<PlayResponse> play(PlayRequest request) async {
+    if (_playing) return PlayResponse();
+    _playing = true;
+    final ctx = _context();
+    if (ctx.state == 'suspended') {
+      await ctx.resume().toDart;
+    }
+    _startSource();
+    return PlayResponse();
+  }
+
+  @override
+  Future<PauseResponse> pause(PauseRequest request) async {
+    if (!_playing) return PauseResponse();
+    _anchor(); // freeze position before we stop producing sound
+    _playing = false;
+    _stopSource();
+    return PauseResponse();
+  }
+
+  @override
+  Future<SeekResponse> seek(SeekRequest request) async {
+    _offsetSec = (request.position?.inMilliseconds ?? 0) / 1000.0;
+    _anchorCtxTime = _nowCtx;
+    if (_playing) _startSource(); // source nodes are one-shot — recreate
+    return SeekResponse();
+  }
+
+  @override
+  Future<SetSpeedResponse> setSpeed(SetSpeedRequest request) async {
+    if (_playing) _anchor(); // capture position at the old rate first
+    _speed = request.speed;
+    _source?.playbackRate.value = _speed;
+    return SetSpeedResponse();
+  }
+
+  @override
+  Future<SetVolumeResponse> setVolume(SetVolumeRequest request) async {
+    _volume = request.volume;
+    _gain?.gain.value = _volume;
+    return SetVolumeResponse();
+  }
+
+  @override
+  Future<SetLoopModeResponse> setLoopMode(SetLoopModeRequest request) async {
+    _loop = request.loopMode != LoopModeMessage.off;
+    _source?.loop = _loop;
+    return SetLoopModeResponse();
+  }
+
+  // No-ops: just_audio replays shuffle state onto every new player, but a
+  // single-clip engine has nothing to shuffle. Must be implemented so the
+  // base class's UnimplementedError doesn't abort load().
+  @override
+  Future<SetShuffleModeResponse> setShuffleMode(
+          SetShuffleModeRequest request) async =>
+      SetShuffleModeResponse();
+
+  @override
+  Future<SetShuffleOrderResponse> setShuffleOrder(
+          SetShuffleOrderRequest request) async =>
+      SetShuffleOrderResponse();
+
+  void _startPositionTimer() {
+    _positionTimer ??= Timer.periodic(
+        const Duration(milliseconds: 200), (_) => broadcastPlaybackEvent());
+  }
+
+  void _stopPositionTimer() {
+    _positionTimer?.cancel();
+    _positionTimer = null;
+  }
+
+  @override
+  Future<void> release() async {
+    _stopSource();
+    _buffer = null;
+    await _ctx?.close().toDart;
+    _ctx = null;
+    await super.release();
   }
 }
 
