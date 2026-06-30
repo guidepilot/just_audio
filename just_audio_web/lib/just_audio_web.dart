@@ -306,9 +306,16 @@ class WebAudioPlayer extends JustAudioPlayer {
     _playing = true;
     final ctx = _context();
     _ensurePlaybackSession(); // re-assert after any interruption/backgrounding
-    if (ctx.state == 'suspended') {
-      await ctx.resume().toDart;
-    }
+    // Re-assert activation unconditionally. iOS/WebKit drops the AudioContext to
+    // 'suspended' or — crucially — the WebKit-specific 'interrupted' state when
+    // the page loses its user activation (e.g. after a media-sync screen swap).
+    // A BufferSourceNode started on a non-running context is silent, and the old
+    // `state == 'suspended'` guard missed 'interrupted', so playback failed
+    // silently with no error to drive the gesture gate. resume() is a no-op on a
+    // running context, reactivates a suspended/interrupted one, and rejects when
+    // the browser blocks playback for lack of a live gesture — letting that
+    // rejection propagate so the caller can reset the gesture gate and re-prompt.
+    await ctx.resume().toDart;
     _startSource();
     return PlayResponse();
   }
