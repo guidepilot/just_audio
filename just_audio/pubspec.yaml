@@ -14,12 +14,20 @@ environment:
   flutter: ">=3.27.0"
 
 dependencies:
-  just_audio_platform_interface: ^4.6.0
-  # just_audio_platform_interface:
-  #   path: ../just_audio_platform_interface
-  just_audio_web: ^0.4.15
-  # just_audio_web:
-  #   path: ../just_audio_web
+  # Reference the fork's own sibling packages via git so a single git dependency
+  # on this `just_audio` transitively pulls the forked web/platform_interface —
+  # no dependency_override needed downstream (overrides don't propagate; git
+  # `dependencies` do). Pinned to the branch; pubspec.lock records the commit.
+  just_audio_platform_interface:
+    git:
+      url: https://github.com/keinerVonIhnen/just_audio.git
+      ref: gp-ios-preserves-pitch
+      path: just_audio_platform_interface
+  just_audio_web:
+    git:
+      url: https://github.com/keinerVonIhnen/just_audio.git
+      ref: gp-ios-preserves-pitch
+      path: just_audio_web
   audio_session: ">=0.1.24 <0.3.0"
   rxdart: '>=0.26.0 <0.29.0'
   path: ^1.8.0
