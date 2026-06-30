@@ -149,22 +149,11 @@ class WebAudioPlayer extends JustAudioPlayer {
   /// is used for (media-sync narration); raise it if you ever feed it music.
   static const double _sampleRate = 22050;
 
-  // TEMP debug logging (media-sync silent-after-swap investigation). Remove once
-  // the root cause is confirmed/fixed.
-  void _log(String m) {
-    // ignore: avoid_print
-    print('[GP/WebAudio] $m');
-  }
-
   AudioContext _context() {
     final existing = _ctx;
     if (existing != null) return existing;
     _ensurePlaybackSession();
-    final ctx = AudioContext(AudioContextOptions(sampleRate: _sampleRate));
-    ctx.addEventListener(
-        'statechange', ((Event _) => _log('ctx.statechange -> ${ctx.state}')).toJS);
-    _log('AudioContext created: state=${ctx.state} sampleRate=$_sampleRate');
-    return _ctx = ctx;
+    return _ctx = AudioContext(AudioContextOptions(sampleRate: _sampleRate));
   }
 
   /// iOS: set the Web AudioSession category to `playback` so this AudioContext
@@ -275,10 +264,7 @@ class WebAudioPlayer extends JustAudioPlayer {
   void _startSource() {
     final ctx = _context();
     final buffer = _buffer;
-    if (buffer == null) {
-      _log('_startSource: NO BUFFER (src=$_src)');
-      return;
-    }
+    if (buffer == null) return;
     _stopSource();
     final src = ctx.createBufferSource();
     src.buffer = buffer;
@@ -290,9 +276,6 @@ class WebAudioPlayer extends JustAudioPlayer {
     _anchorCtxTime = _nowCtx;
     _source = src;
     _startPositionTimer();
-    _log('_startSource: started @${_offsetSec.toStringAsFixed(2)}s '
-        'ctx.state=${ctx.state} ctxTime=${_nowCtx.toStringAsFixed(2)} '
-        'speed=$_speed vol=$_volume');
   }
 
   void _stopSource() {
@@ -319,12 +302,7 @@ class WebAudioPlayer extends JustAudioPlayer {
 
   @override
   Future<PlayResponse> play(PlayRequest request) async {
-    _log('play() called: _playing=$_playing ctx.state=${_ctx?.state} '
-        'pos=${_positionSec.toStringAsFixed(2)}s buffer=${_buffer != null}');
-    if (_playing) {
-      _log('play() early-return: already _playing (no resume / no start)');
-      return PlayResponse();
-    }
+    if (_playing) return PlayResponse();
     _playing = true;
     final ctx = _context();
     _ensurePlaybackSession(); // re-assert after any interruption/backgrounding
@@ -340,12 +318,11 @@ class WebAudioPlayer extends JustAudioPlayer {
     // Best-effort activation, bounded so a never-resolving WebKit resume()
     // promise can't hang play() (and the awaiting caller) forever. The source
     // is already scheduled, so this only gates when play() *returns*.
-    _log('play() pre-resume ctx.state=${ctx.state}');
     try {
       await ctx.resume().toDart.timeout(const Duration(milliseconds: 500));
-      _log('play() resume completed ctx.state=${ctx.state}');
-    } catch (e) {
-      _log('play() resume did not complete in budget: $e (ctx.state=${ctx.state})');
+    } catch (_) {
+      // resume() rejected or never resolved within the budget — fall through
+      // and decide based on what the context actually did.
     }
 
     // If the context still isn't running, this is a genuine autoplay block (no
@@ -354,7 +331,6 @@ class WebAudioPlayer extends JustAudioPlayer {
     // context IS running (incl. WebKit's resolve-never-fires-but-running case),
     // the source is already audible and we return normally.
     if (ctx.state != 'running') {
-      _log('play() context not running after resume budget (${ctx.state}) -> signalling blocked');
       _playing = false;
       _stopSource();
       throw PlatformException(
@@ -367,8 +343,6 @@ class WebAudioPlayer extends JustAudioPlayer {
 
   @override
   Future<PauseResponse> pause(PauseRequest request) async {
-    _log('pause(): _playing=$_playing ctx.state=${_ctx?.state} '
-        'pos=${_positionSec.toStringAsFixed(2)}s');
     if (!_playing) return PauseResponse();
     _anchor(); // freeze position before we stop producing sound
     _playing = false;
@@ -380,13 +354,6 @@ class WebAudioPlayer extends JustAudioPlayer {
   Future<SeekResponse> seek(SeekRequest request) async {
     _offsetSec = (request.position?.inMilliseconds ?? 0) / 1000.0;
     _anchorCtxTime = _nowCtx;
-    // NB: seek does NOT resume the context. If the context is suspended/
-    // interrupted, recreating the source here produces no sound AND ctx.currentTime
-    // is frozen, so _positionSec never advances — which makes the drift controller
-    // hard-seek forever. This log surfaces exactly that case.
-    _log('seek(${_offsetSec.toStringAsFixed(2)}s): _playing=$_playing '
-        'ctx.state=${_ctx?.state} ctxTime=${_nowCtx.toStringAsFixed(2)} '
-        '${_playing ? "-> _startSource" : "(not playing, no restart)"}');
     if (_playing) _startSource(); // source nodes are one-shot — recreate
     return SeekResponse();
   }
