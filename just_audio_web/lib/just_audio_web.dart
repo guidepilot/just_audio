@@ -328,24 +328,40 @@ class WebAudioPlayer extends JustAudioPlayer {
     _playing = true;
     final ctx = _context();
     _ensurePlaybackSession(); // re-assert after any interruption/backgrounding
-    // Re-assert activation unconditionally. iOS/WebKit drops the AudioContext to
-    // 'suspended' or — crucially — the WebKit-specific 'interrupted' state when
-    // the page loses its user activation (e.g. after a media-sync screen swap).
-    // A BufferSourceNode started on a non-running context is silent, and the old
-    // `state == 'suspended'` guard missed 'interrupted', so playback failed
-    // silently with no error to drive the gesture gate. resume() is a no-op on a
-    // running context, reactivates a suspended/interrupted one, and rejects when
-    // the browser blocks playback for lack of a live gesture — letting that
-    // rejection propagate so the caller can reset the gesture gate and re-prompt.
+
+    // Schedule the source FIRST and never gate it behind resume(). A
+    // BufferSourceNode started on a suspended-but-resuming context plays the
+    // moment currentTime advances. WebKit's resume() promise frequently never
+    // resolves even though the context does start running — awaiting it (the
+    // old behaviour) left _startSource unreached, so playback was silent after
+    // a media-sync screen swap while the position clock kept advancing.
+    _startSource();
+
+    // Best-effort activation, bounded so a never-resolving WebKit resume()
+    // promise can't hang play() (and the awaiting caller) forever. The source
+    // is already scheduled, so this only gates when play() *returns*.
     _log('play() pre-resume ctx.state=${ctx.state}');
     try {
-      await ctx.resume().toDart;
-      _log('play() post-resume ctx.state=${ctx.state}');
+      await ctx.resume().toDart.timeout(const Duration(milliseconds: 500));
+      _log('play() resume completed ctx.state=${ctx.state}');
     } catch (e) {
-      _log('play() resume() REJECTED: $e (ctx.state=${ctx.state})');
-      rethrow;
+      _log('play() resume did not complete in budget: $e (ctx.state=${ctx.state})');
     }
-    _startSource();
+
+    // If the context still isn't running, this is a genuine autoplay block (no
+    // live user activation). Stop the silent scheduled source and surface it so
+    // the caller can reset the gesture gate and re-prompt for a tap. When the
+    // context IS running (incl. WebKit's resolve-never-fires-but-running case),
+    // the source is already audible and we return normally.
+    if (ctx.state != 'running') {
+      _log('play() context not running after resume budget (${ctx.state}) -> signalling blocked');
+      _playing = false;
+      _stopSource();
+      throw PlatformException(
+          code: 'autoplay_blocked',
+          message: 'WebAudioPlayer: AudioContext did not reach running state '
+              '(state=${ctx.state}); user activation required.');
+    }
     return PlayResponse();
   }
 
