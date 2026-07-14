@@ -20,12 +20,12 @@ dependencies:
   # `dependencies` do). Pinned to the branch; pubspec.lock records the commit.
   just_audio_platform_interface:
     git:
-      url: https://github.com/keinerVonIhnen/just_audio.git
+      url: https://github.com/guidepilot/just_audio.git
       ref: gp-ios-preserves-pitch
       path: just_audio_platform_interface
   just_audio_web:
     git:
-      url: https://github.com/keinerVonIhnen/just_audio.git
+      url: https://github.com/guidepilot/just_audio.git
       ref: gp-ios-preserves-pitch
       path: just_audio_web
   audio_session: ">=0.1.24 <0.3.0"

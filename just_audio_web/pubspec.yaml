@@ -15,7 +15,7 @@ dependencies:
   # (see just_audio/pubspec.yaml). pubspec.lock records the resolved commit.
   just_audio_platform_interface:
     git:
-      url: https://github.com/keinerVonIhnen/just_audio.git
+      url: https://github.com/guidepilot/just_audio.git
       ref: gp-ios-preserves-pitch
       path: just_audio_platform_interface
   flutter:
